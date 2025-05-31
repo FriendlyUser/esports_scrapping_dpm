@@ -1,0 +1,5 @@
+dateparser
+pydoll
+pandas
+python-dotenv
+beautifulsoup4
