@@ -10,6 +10,14 @@ from pydoll.browser.options import Options
 from pydoll.constants import By
 from datetime import datetime, timedelta
 import dateparser
+import re
+
+def sanitize_filename(url_or_string):
+    """Sanitizes a URL or string to be a valid filename."""
+    s = str(url_or_string)
+    s = s.replace("http://", "").replace("https://", "")
+    s = re.sub(r'[^\w\-\._]', '_', s)
+    return s
 
 def parse_esports_data(html_content):
     """
@@ -266,156 +274,219 @@ def create_dpm_lol_date_urls(esports_games):
     # date_urls = [f"{base_url}{date_s}" for date_s in sorted(list(unique_date_strings))]
     # return date_urls
 
-def parse_dpm_match_and_h2h_data(dpm_soup, playnow_games_list, dpm_url_date_str, script_run_dt):
+async def find_and_click_dpm_match_on_schedule_page(page, playnow_game_to_match, dpm_page_date_str):
     """
-    Parses a dpm.lol page for match details and H2H statistics, then updates the playnow_games_list.
+    Refactored logic: Finds a match on the DPM schedule page by searching for team text,
+    clicking its grandparent, then clicking a "More" button, and finally
+    returning the soup of the detailed match view.
 
     Args:
-        dpm_soup (BeautifulSoup): Parsed HTML of a dpm.lol date page.
-        playnow_games_list (list): List of game dicts from parse_esports_data (PlayNow).
-                                   This list will be modified in-place.
-        dpm_url_date_str (str): The date string from the DPM URL (e.g., "6-1" for June 1st, format M-D).
-        script_run_dt (datetime): The datetime when the script was initiated (for context).
+        page: pydoll page object.
+        playnow_game_to_match: Dict of the PlayNow game to match.
+        dpm_page_date_str: Date string for the current DPM page.
+
+    Returns:
+        BeautifulSoup object of the detailed match view, or None.
     """
-    # Find all identifiable match headers on the DPM page
-    # These are divs with classes like "grid grid-cols-3 animate-fade-in" containing team info
-    dpm_match_headers = dpm_soup.find_all('div', class_=lambda c: c and all(cls in c for cls in ['grid', 'grid-cols-3', 'animate-fade-in']))
+    pn_t1_norm = playnow_game_to_match['team1_name'].strip()
+    pn_t2_norm = playnow_game_to_match['team2_name'].strip()
+    print(f"➡️ Attempting to match game: '{pn_t1_norm}' vs '{pn_t2_norm}' on DPM page for {dpm_page_date_str}")
 
-    if not dpm_match_headers:
-        print(f"  [DPM Parser] No DPM match headers found on page for date {dpm_url_date_str}.")
-        return
+    # 1. Find the main content area
+    # The selector "div.lg:col-span-4" targets a div with both "lg:col-span-4" classes.
+    # CSS selectors require escaping for colons, so "lg\\:col-span-4".
+    main_content_area_css_selector = r"div.lg\\:col-span-4"
+    main_content_area = None
+    try:
+        # Use page.find_elements which typically returns a list
+        main_content_elements = await page.find_elements(By.CSS_SELECTOR, main_content_area_css_selector)
+        if not main_content_elements:
+            print(f"⚠️ Could not find main content area with selector '{main_content_area_css_selector}'.")
+            return None
+        main_content_area = main_content_elements[0] # Use the first element found
+        print(f"✅ Found main content area.")
+    except Exception as e:
+        print(f"❌ ERROR finding main content area '{main_content_area_css_selector}': {e}")
+        return None
 
-    for dpm_match_header in dpm_match_headers:
-        team_links = dpm_match_header.find_all('a', href=lambda h: h and h.startswith('/esport/teams/'))
-        if len(team_links) < 2:
-            continue
+    # 2. Look for an element containing team text, then click its grandparent
+    clicked_game_element = False
+    target_grandparent_to_click = None
+
+    # reference xpath //*[contains(text(), 'Karmine Corp') or contains(text(), 'Team Heretics')]
+
+    
+    try:
+        # format using raw string team_text_path = f"//*[contains(text(), '{pn_t1_norm}') or contains(text(), '{pn_t2_norm}')]"   
+        team_text_path = f"//*[contains(text(), '{pn_t1_norm}') or contains(text(), '{pn_t2_norm}')]"
+        team_text_elements = await main_content_area.find_elements(By.XPATH, team_text_path)
+        if team_text_elements:
+            target_grandparent_to_click = team_text_elements[0]
+            print(target_grandparent_to_click)
+            await target_grandparent_to_click.click()
+            print(f"✅ Clicked the grandparent element for game '{pn_t1_norm}' vs '{pn_t2_norm}'.")
+            await asyncio.sleep(2) # Wait for page to potentially update
+        else:
+            print(f"⚠️ Could not find an element with team text '{pn_t1_norm}' or '{pn_t2_norm}'.") 
+
+    except Exception as e:
+        print(f"❌ ERROR finding or clicking game element via text search: {e}")
+        return None
+
+    # 3. Look for a button that contains the word "More" and click it
+    # Based on original function, this is likely for H2H details.
+    # If the button literally contains "text", change 'more' to 'text' in the XPath.
+    more_button_clicked = False
+    try:
+        # XPath to find any button on the page containing "More" (case-insensitive).
+        more_button_xpath = "//button[contains(translate(normalize-space(.), 'MORE', 'more'), 'more')]"
         
-        dpm_t1_img = team_links[0].find('img', alt=True)
-        dpm_t1_name_full = dpm_t1_img['alt'].strip() if dpm_t1_img else None
+        h2h_more_buttons = await page.find_elements(By.XPATH, more_button_xpath)
         
-        dpm_t2_img = team_links[1].find('img', alt=True)
-        dpm_t2_name_full = dpm_t2_img['alt'].strip() if dpm_t2_img else None
+        if h2h_more_buttons:
+            print(f"ℹ️ Found {len(h2h_more_buttons)} button(s) containing 'More'.")
+            # click the 3rd button
+            last_button = h2h_more_buttons[-1]
+            await last_button.click()
+            print("✅ Clicked a 'More' button.")
+            await asyncio.sleep(1.5) # Wait for content to load/expand
+        else:
+            print("ℹ️ No button containing 'More' found. Details might be visible or accessed differently.")
 
-        if not dpm_t1_name_full or not dpm_t2_name_full:
-            continue
+    except Exception as e:
+        print(f"❌ ERROR interacting with 'More' button: {e}")
+        # Depending on requirements, this might not be a fatal error.
 
-        for playnow_game in playnow_games_list:
-            if 'dpm_h2h' in playnow_game: # Already matched and processed this PlayNow game
-                continue
+    # 4. Return the soup of the detailed match view
+    try:
+        page_source_after_interactions = await page.page_source # Or relevant pydoll method
+        print("✅ Successfully retrieved page source after interactions.")
+        return BeautifulSoup(page_source_after_interactions, 'html.parser')
+    except Exception as e:
+        print(f"❌ ERROR getting final page source: {e}")
+        return None
 
-            playnow_t1_name = playnow_game['team1_name']
-            playnow_t2_name = playnow_game['team2_name']
-            playnow_dt = playnow_game.get('date_time')
 
-            if not playnow_dt: # Skip PlayNow game if no datetime
-                continue
+def parse_h2h_from_dpm_match_view(dpm_match_view_soup, playnow_game_to_update, dpm_url_date_str, script_run_dt):
+    """
+    Parses H2H data from a DPM match's detailed view soup and updates the playnow_game_to_update.
+    Args:
+        dpm_match_view_soup (BeautifulSoup): Soup of the DPM detailed match view.
+        playnow_game_to_update (dict): The PlayNow game dictionary to update.
+        dpm_url_date_str (str): Date string of the DPM page (for context).
+        script_run_dt (datetime): Script execution datetime (for context).
+    """
+    print(f"    Parsing H2H data for: {playnow_game_to_update['team1_name']} vs {playnow_game_to_update['team2_name']}")
 
-            # 1. Check Date Match
-            dpm_page_month, dpm_page_day = map(int, dpm_url_date_str.split('-'))
-            if not (playnow_dt.month == dpm_page_month and playnow_dt.day == dpm_page_day):
-                continue # Dates don't match this PlayNow game
+    # Find the H2H section. In the provided H2H HTML, it's a div with id="radix-..." and data-state="open"
+    # This is the container for "ALL TIME WINS" and "LAST 5 GAMES"
+    h2h_section = dpm_match_view_soup.find('div', id=lambda x: x and x.startswith('radix-'), attrs={'data-state': 'open'})
+    
+    if not h2h_section:
+        # Fallback: sometimes the main content of a tab/collapsible doesn't have data-state itself but its parent does.
+        # Or the ID might be on a different element. Let's try to find a known H2H header.
+        all_time_wins_header = dpm_match_view_soup.find('span', string=lambda s: s and "ALL TIME WINS" in s.upper())
+        if all_time_wins_header:
+            # Try to find a common ancestor that seems like the H2H block
+            h2h_section = all_time_wins_header.find_parent('div', class_=lambda c: c and 'flex-col' in c and 'items-center' in c and 'gap-8' in c)
+            if not h2h_section: # If specific class not found, go up a few generic divs
+                 parent_candidate = all_time_wins_header
+                 for _ in range(3): # Go up 3 levels
+                     if parent_candidate.parent:
+                         parent_candidate = parent_candidate.parent
+                         if parent_candidate.name == 'div' and parent_candidate.find('span', string=lambda s: s and "LAST 5 GAMES" in s.upper()):
+                             h2h_section = parent_candidate
+                             break
+                     else: break
+        if not h2h_section:
+            print(f"      [DPM H2H Parser] Could not find H2H section in the provided DPM match view.")
+            return
 
-            # 2. Check Team Names (case-insensitive, order-insensitive)
-            pn_t1_norm = playnow_t1_name.lower().strip()
-            pn_t2_norm = playnow_t2_name.lower().strip()
-            dpm_t1_norm = dpm_t1_name_full.lower().strip()
-            dpm_t2_norm = dpm_t2_name_full.lower().strip()
+    # DPM Team Names from this H2H view for correct mapping
+    # The H2H view should have team name elements similar to the original example
+    dpm_teams_in_h2h_view = h2h_section.find_all('a', href=lambda h: h and h.startswith('/esport/teams/'))
+    dpm_t1_name_h2h = "N/A"
+    dpm_t2_name_h2h = "N/A"
 
-            teams_match = (
-                (pn_t1_norm == dpm_t1_norm and pn_t2_norm == dpm_t2_norm) or
-                (pn_t1_norm == dpm_t2_norm and pn_t2_norm == dpm_t1_norm)
-            )
+    if len(dpm_teams_in_h2h_view) >= 1:
+        img_t1 = dpm_teams_in_h2h_view[0].find('img', alt=True)
+        dpm_t1_name_h2h = img_t1['alt'].strip() if img_t1 else dpm_teams_in_h2h_view[0].get_text(strip=True)
+    if len(dpm_teams_in_h2h_view) >= 2:
+        img_t2 = dpm_teams_in_h2h_view[1].find('img', alt=True)
+        dpm_t2_name_h2h = img_t2['alt'].strip() if img_t2 else dpm_teams_in_h2h_view[1].get_text(strip=True)
+    
+    # Normalize DPM team names from H2H view
+    dpm_t1_norm_h2h = dpm_t1_name_h2h.lower().strip()
+    dpm_t2_norm_h2h = dpm_t2_name_h2h.lower().strip()
 
-            if teams_match:
-                print(f"  [DPM Parser] Matched PlayNow: '{playnow_t1_name} vs {playnow_t2_name}' with DPM: '{dpm_t1_name_full} vs {dpm_t2_name_full}' on date {dpm_url_date_str}")
+    # Normalize PlayNow team names (from the game object being updated)
+    pn_t1_norm = playnow_game_to_update['team1_name'].lower().strip()
+    pn_t2_norm = playnow_game_to_update['team2_name'].lower().strip()
+
+
+    # --- Parse "ALL TIME WINS" ---
+    all_time_wins_data = {"team1_dpm_order_wins": "N/A", "team2_dpm_order_wins": "N/A"}
+    all_wins_container = h2h_section.find('div', class_=lambda c: c and 'grid-cols-7' in c and 'text-hxs' in c)
+    if all_wins_container and "ALL TIME WINS" in all_wins_container.text:
+        numbers = [s.strip() for s in all_wins_container.stripped_strings if s.strip().isdigit()]
+        if len(numbers) == 2:
+            all_time_wins_data["team1_dpm_order_wins"] = numbers[0] # This is DPM's T1 in the H2H display
+            all_time_wins_data["team2_dpm_order_wins"] = numbers[1] # This is DPM's T2 in the H2H display
+    
+    # --- Parse "LAST 5 GAMES" ---
+    last_5_games_list = []
+    last_5_header_span = h2h_section.find('span', string=lambda s: s and "LAST 5 GAMES" in s.upper())
+    if last_5_header_span:
+        game_history_divs = h2h_section.find_all('div', class_=lambda c: c and all(cls in c for cls in ['grid', 'grid-cols-3', 'h-44', 'items-center']))
+        for game_div in game_history_divs:
+            hist_game_data = {"date": "N/A", "team1_name": "N/A", "score1": "N/A", 
+                              "team2_name": "N/A", "score2": "N/A", "winner": "N/A"}
+            
+            date_el = game_div.find('span', class_=lambda c: c and 'text-bxs' in c and 'text-start' in c)
+            if date_el: hist_game_data["date"] = date_el.text.strip()
+
+            score_details_div = game_div.find('div', class_=lambda c: c and 'tabular-nums' in c)
+            if score_details_div:
+                team_imgs = score_details_div.find_all('img', alt=True)
+                if len(team_imgs) >= 1 and team_imgs[0].has_attr('alt'): hist_game_data["team1_name"] = team_imgs[0]['alt'].strip()
+                if len(team_imgs) >= 2 and team_imgs[1].has_attr('alt'): hist_game_data["team2_name"] = team_imgs[1]['alt'].strip()
                 
-                # Find H2H section: div with id starting with "radix-"
-                # This div is usually within a broader "game card" container.
-                game_card_root = None
-                temp_element = dpm_match_header
-                for _ in range(5): # Search up to 5 levels for a div[data-state="open"] containing a radix-id div
-                    if temp_element.name == 'div' and temp_element.get('data-state') == 'open' and \
-                       temp_element.find('div', id=lambda x: x and x.startswith('radix-')):
-                        game_card_root = temp_element
-                        break
-                    if temp_element.parent:
-                        temp_element = temp_element.parent
-                    else:
-                        break
-                
-                h2h_section = None
-                if game_card_root:
-                    h2h_section = game_card_root.find('div', id=lambda x: x and x.startswith('radix-'))
+                score_span_container = score_details_div.find('div', class_=lambda c: c and 'gap-8' in c and 'justify-center' in c)
+                if score_span_container:
+                    score_spans = score_span_container.find_all('span', recursive=False)
+                    if len(score_spans) == 2:
+                        hist_game_data["score1"] = score_spans[0].text.strip()
+                        hist_game_data["score2"] = score_spans[1].text.strip()
+                        s1_classes = score_spans[0].get('class', [])
+                        s2_classes = score_spans[1].get('class', [])
+                        if 'font-black' in s1_classes or ('opacity-50' not in s1_classes and 'opacity-50' in s2_classes):
+                            hist_game_data["winner"] = hist_game_data["team1_name"]
+                        elif 'font-black' in s2_classes or ('opacity-50' not in s2_classes and 'opacity-50' in s1_classes):
+                            hist_game_data["winner"] = hist_game_data["team2_name"]
+            last_5_games_list.append(hist_game_data)
 
-                if not h2h_section:
-                    print(f"    [DPM Parser] Could not find H2H section for {dpm_t1_name_full} vs {dpm_t2_name_full}")
-                    continue # Try next PlayNow game or next DPM header
+    # Store H2H data in the playnow_game_to_update object
+    final_h2h_data = {}
+    # Map DPM's order of all_time_wins to PlayNow's team order
+    if dpm_t1_norm_h2h == pn_t1_norm and dpm_t2_norm_h2h == pn_t2_norm : # DPM T1 (H2H view) is PlayNow T1
+        final_h2h_data['all_time_wins_t1'] = all_time_wins_data["team1_dpm_order_wins"]
+        final_h2h_data['all_time_wins_t2'] = all_time_wins_data["team2_dpm_order_wins"]
+    elif dpm_t1_norm_h2h == pn_t2_norm and dpm_t2_norm_h2h == pn_t1_norm: # DPM T1 (H2H view) is PlayNow T2
+        final_h2h_data['all_time_wins_t1'] = all_time_wins_data["team2_dpm_order_wins"]
+        final_h2h_data['all_time_wins_t2'] = all_time_wins_data["team1_dpm_order_wins"]
+    else:
+        # If DPM team names in H2H view don't perfectly match PlayNow names (after normalization)
+        # this mapping might be incorrect. Log a warning.
+        print(f"      [DPM H2H Warning] Team name mismatch between PlayNow ({pn_t1_norm}, {pn_t2_norm}) and DPM H2H view ({dpm_t1_norm_h2h}, {dpm_t2_norm_h2h}). All-time wins assignment might be ambiguous.")
+        # Assign based on DPM order as a fallback, but flag it
+        final_h2h_data['all_time_wins_dpm_order_t1'] = all_time_wins_data["team1_dpm_order_wins"]
+        final_h2h_data['all_time_wins_dpm_order_t2'] = all_time_wins_data["team2_dpm_order_wins"]
 
-                # --- Parse "ALL TIME WINS" ---
-                all_time_wins_data = {"team1_dpm_order_wins": "N/A", "team2_dpm_order_wins": "N/A"}
-                # The structure is: <div ... grid-cols-7 ...> NUM <span ...>ALL TIME WINS</span> NUM </div>
-                all_wins_container = h2h_section.find('div', class_=lambda c: c and 'grid-cols-7' in c and c and 'text-hxs' in c) # More specific
-                if all_wins_container and "ALL TIME WINS" in all_wins_container.text:
-                    numbers = [s.strip() for s in all_wins_container.stripped_strings if s.strip().isdigit()]
-                    if len(numbers) == 2:
-                        all_time_wins_data["team1_dpm_order_wins"] = numbers[0]
-                        all_time_wins_data["team2_dpm_order_wins"] = numbers[1]
-                
-                # --- Parse "LAST 5 GAMES" ---
-                last_5_games_list = []
-                last_5_header_span = h2h_section.find('span', string=lambda s: s and "LAST 5 GAMES" in s.upper())
-                if last_5_header_span:
-                    # Game history divs are typically siblings or near siblings after this header
-                    # Class: "grid grid-cols-3 w-full h-44 ..."
-                    game_history_divs = h2h_section.find_all('div', class_=lambda c: c and all(cls in c for cls in ['grid', 'grid-cols-3', 'h-44', 'items-center']))
-                    
-                    for game_div in game_history_divs:
-                        hist_game_data = {"date": "N/A", "team1_name": "N/A", "score1": "N/A", 
-                                          "team2_name": "N/A", "score2": "N/A", "winner": "N/A"}
-                        
-                        date_el = game_div.find('span', class_=lambda c: c and 'text-bxs' in c and 'text-start' in c)
-                        if date_el: hist_game_data["date"] = date_el.text.strip()
 
-                        score_details_div = game_div.find('div', class_=lambda c: c and 'tabular-nums' in c) # Contains team imgs and scores
-                        if score_details_div:
-                            team_imgs = score_details_div.find_all('img', alt=True)
-                            if len(team_imgs) >= 1: hist_game_data["team1_name"] = team_imgs[0]['alt'].strip()
-                            if len(team_imgs) >= 2: hist_game_data["team2_name"] = team_imgs[1]['alt'].strip()
-                            
-                            # Score structure: <div ... gap-8> <span class="opacity-50">SCORE1</span> - <span class="font-black">SCORE2</span> </div>
-                            score_span_container = score_details_div.find('div', class_=lambda c: c and 'gap-8' in c and 'justify-center' in c)
-                            if score_span_container:
-                                score_spans = score_span_container.find_all('span', recursive=False) # Direct children spans
-                                if len(score_spans) == 2: # Expecting two spans for scores
-                                    hist_game_data["score1"] = score_spans[0].text.strip()
-                                    hist_game_data["score2"] = score_spans[1].text.strip()
-
-                                    s1_classes = score_spans[0].get('class', [])
-                                    s2_classes = score_spans[1].get('class', [])
-                                    
-                                    # Winner based on font-black (winner) vs opacity-50 (loser)
-                                    if 'font-black' in s1_classes or ('opacity-50' not in s1_classes and 'opacity-50' in s2_classes):
-                                        hist_game_data["winner"] = hist_game_data["team1_name"]
-                                    elif 'font-black' in s2_classes or ('opacity-50' not in s2_classes and 'opacity-50' in s1_classes):
-                                        hist_game_data["winner"] = hist_game_data["team2_name"]
-                        
-                        last_5_games_list.append(hist_game_data)
-
-                # Store H2H data in the playnow_game object
-                final_h2h_data = {}
-                # Map DPM's order of all_time_wins to PlayNow's team order
-                if dpm_t1_norm == pn_t1_norm: # DPM T1 is PlayNow T1
-                    final_h2h_data['all_time_wins_t1'] = all_time_wins_data["team1_dpm_order_wins"]
-                    final_h2h_data['all_time_wins_t2'] = all_time_wins_data["team2_dpm_order_wins"]
-                else: # DPM T1 was PlayNow T2 (teams were swapped in DPM display relative to PlayNow)
-                    final_h2h_data['all_time_wins_t1'] = all_time_wins_data["team2_dpm_order_wins"]
-                    final_h2h_data['all_time_wins_t2'] = all_time_wins_data["team1_dpm_order_wins"]
-                
-                final_h2h_data['last_5_games'] = last_5_games_list
-                playnow_game['dpm_h2h'] = final_h2h_data
-                
-                print(f"    [DPM Parser] Successfully parsed and stored H2H for {playnow_t1_name} vs {playnow_t2_name}")
-                break # Found match and processed H2H for this playnow_game, move to next DPM header
+    final_h2h_data['last_5_games'] = last_5_games_list
+    playnow_game_to_update['dpm_h2h'] = final_h2h_data
+    
+    print(f"      Successfully parsed and stored H2H for {playnow_game_to_update['team1_name']} vs {playnow_game_to_update['team2_name']}")
 
 async def main():
     starting_url = "https://www.playnow.com/sports/sports/category/2945/esports/league-of-legends/matches"
@@ -448,46 +519,111 @@ async def main():
         esports_games = parse_esports_data(page_source)
 
 
-        dpm_date_urls, games_by_date = create_dpm_lol_date_urls(esports_games)
-        for url in dpm_date_urls:
-            print(url)
+        dpm_date_urls, games_by_dpm_date = create_dpm_lol_date_urls(esports_games)
+        print(f"\nGenerated {len(dpm_date_urls)} DPM.lol date URLs to visit.")
+        script_run_datetime = datetime.now()
 
-            # take screenshot
-            await page.go_to(url)
-            await asyncio.sleep(5)
-            page_source = await page.page_source 
-            with open (f"data/{url}.html", "w", errors='ignore') as f:
-                f.write(page_source)
-            await page.screenshot(f"data/{url}.png")
+        for dpm_url in dpm_date_urls:
+            print(f"\nProcessing DPM URL: {dpm_url}")
+            try:
+                await page.go_to(dpm_url)
+                print("  Waiting for DPM page to load (5 seconds)...")
+                await asyncio.sleep(5)
+                page_source_dpm_schedule = await page.page_source # This is the schedule view for the date
 
-            # grab the games making with the "current date"
-            current_date_from_url = url.split("?date=")[-1]
-            ref_games = games_by_date[current_date_from_url]
+                safe_dpm_url_filename_part = sanitize_filename(dpm_url)
+                dpm_schedule_html_path = f"data/dpm_schedule_{safe_dpm_url_filename_part}.html"
+                with open(dpm_schedule_html_path, "w", encoding='utf-8', errors='ignore') as f:
+                    f.write(page_source_dpm_schedule)
+                print(f"  Saved DPM schedule HTML to {dpm_schedule_html_path}")
+                
+                dpm_schedule_soup = BeautifulSoup(page_source_dpm_schedule, 'html.parser')
+                dpm_page_date_str = dpm_url.split("?date=")[-1] 
+                
+                playnow_games_for_this_dpm_date = games_by_dpm_date.get(dpm_page_date_str, [])
 
-            print("games happening today", ref_games)
+                if not playnow_games_for_this_dpm_date:
+                    print(f"  No PlayNow games found for DPM date {dpm_page_date_str}. Skipping detailed DPM parsing for this date's games.")
+                    continue
 
-            page_source_dpm = await page.page_source
+                for playnow_game_entry in playnow_games_for_this_dpm_date:
+                    if 'dpm_h2h' in playnow_game_entry: # Already processed
+                        print(f"  Skipping already processed PlayNow game: {playnow_game_entry['team1_name']} vs {playnow_game_entry['team2_name']}")
+                        continue
+                    
+                    print(f"  Attempting to find and process DPM match for PlayNow game: {playnow_game_entry['team1_name']} vs {playnow_game_entry['team2_name']}")
+                    
+                    # This function will find the match on DPM schedule, click it, click "More", and return the new soup
+                    soup_of_detailed_dpm_match_view = await find_and_click_dpm_match_on_schedule_page(
+                        page, 
+                        playnow_game_entry, 
+                        dpm_page_date_str,
+                    )
 
-            # Save DPM HTML and screenshot
-            safe_dpm_url_filename_part = url
-            dpm_html_path = os.path.join('data', f"dpm_{safe_dpm_url_filename_part}.html")
-
-            with open(dpm_html_path, "w", encoding='utf-8', errors='ignore') as f:
-                f.write(page_source_dpm)
-            print(f"  Saved DPM HTML to {dpm_html_path}")
+                    if soup_of_detailed_dpm_match_view:
+                        # Save the HTML of the detailed view for debugging
+                        detailed_view_filename = f"dpm_detail_{playnow_game_entry['team1_name']}_vs_{playnow_game_entry['team2_name']}_{dpm_page_date_str}.html"
+                        detailed_view_path = f"data/{detailed_view_filename}"
+                        with open(detailed_view_path, "w", encoding='utf-8', errors='ignore') as f:
+                            f.write(soup_of_detailed_dpm_match_view.prettify())
+                        print(f"    Saved DPM detailed match view HTML to {detailed_view_path}")
+                        
+                        parse_h2h_from_dpm_match_view(
+                            soup_of_detailed_dpm_match_view, 
+                            playnow_game_entry, 
+                            dpm_page_date_str, 
+                            script_run_datetime
+                        )
+                        # Go back to the schedule page for this date to process the next PlayNow game for this date
+                        # This is important if clicking a game navigates away fully.
+                        # If it's an overlay, this might not be strictly necessary but good for robustness.
+                        # print(f"    Navigating back to DPM schedule page {dpm_url} to look for next match on this date.")
+                        await page.go_to(dpm_url)
+                        await asyncio.sleep(3) # Allow schedule page to reload
+                        # dpm_schedule_soup = BeautifulSoup(await page.page_source, 'html.parser') # Re-parse schedule soup
+                    else:
+                        print(f"    Could not get detailed DPM match view for {playnow_game_entry['team1_name']} vs {playnow_game_entry['team2_name']}.")
             
-            # await page.screenshot({'path': dpm_screenshot_path}) # pydoll screenshot syntax might differ
-            # print(f"  Saved DPM screenshot to {dpm_screenshot_path}")
+            except Exception as e:
+                print(f"  Error processing DPM URL {dpm_url} or its games: {e}")
 
-            dpm_soup = BeautifulSoup(page_source_dpm, 'html.parser')
-            dpm_page_date_str = url.split("?date=")[-1] # Extracts "M-D"
+        print("\n\n--- Combined eSports Data with DPM Head-to-Head ---")
+        for game in esports_games:
+            print(f"\nRegion: {game.get('region', 'N/A')}")
+            print(f"  Status: {game.get('live_status', 'N/A')}")
+            print(f"  PlayNow Date String: {game.get('date_string', 'N/A')}")
+            print(f"  Parsed DateTime: {game.get('date_time_formatted', 'N/A')}")
+            print(f"  Match: {game.get('team1_name', 'N/A')} vs {game.get('team2_name', 'N/A')}")
+            print(f"  Odds (PlayNow): {game.get('team1_name', 'N/A')} ({game.get('team1_odds', 'N/A')}) vs {game.get('team2_name', 'N/A')} ({game.get('team2_odds', 'N/A')})")
+            
+            if 'dpm_h2h' in game:
+                h2h = game['dpm_h2h']
+                t1_name_playnow = game['team1_name'] 
+                t2_name_playnow = game['team2_name']
 
-            # --- 4. Parse DPM page and update PlayNow games with H2H data ---
-            # Consider passing games_by_dpm_date[dpm_page_date_str] to parse_dpm_match_and_h2h_data
-            # if you want to optimize and only pass games relevant to the current DPM page's date.
-            # For now, it still uses the full esports_games_playnow list and filters by date inside.
-            parse_dpm_match_and_h2h_data(dpm_soup, esports_games, dpm_page_date_str, script_run_datetime)
-        
+                print("  DPM Head-to-Head:")
+                # Check which key was used for all_time_wins based on successful mapping
+                if 'all_time_wins_t1' in h2h:
+                    print(f"    All Time Wins ({t1_name_playnow}): {h2h.get('all_time_wins_t1', 'N/A')}")
+                    print(f"    All Time Wins ({t2_name_playnow}): {h2h.get('all_time_wins_t2', 'N/A')}")
+                elif 'all_time_wins_dpm_order_t1' in h2h:
+                    print(f"    All Time Wins (DPM Order T1): {h2h.get('all_time_wins_dpm_order_t1', 'N/A')} (Warning: Team name mapping was ambiguous)")
+                    print(f"    All Time Wins (DPM Order T2): {h2h.get('all_time_wins_dpm_order_t2', 'N/A')}")
+                else:
+                    print(f"    All Time Wins: Data not fully parsed or available.")
 
+                if h2h.get('last_5_games'):
+                    print("    Last 5 Games (DPM Data):")
+                    for i, hist_game in enumerate(h2h.get('last_5_games', [])):
+                        print(f"      {i+1}. Date: {hist_game.get('date', 'N/A')} | "
+                            f"{hist_game.get('team1_name', 'T1')} {hist_game.get('score1', 'S1')} - "
+                            f"{hist_game.get('score2', 'S2')} {hist_game.get('team2_name', 'T2')} "
+                            f"| Winner: {hist_game.get('winner', 'N/A')}")
+                else:
+                    print("    Last 5 Games (DPM Data): Not available or not parsed.")
+            else:
+                print("  DPM Head-to-Head: Not found or not matched on DPM.lol for this date.")
+            print("-" * 30)
 
-asyncio.run(main())
+if __name__ == '__main__':
+    asyncio.run(main())
