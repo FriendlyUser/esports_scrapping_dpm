@@ -349,7 +349,10 @@ async def find_and_click_dpm_match_on_schedule_page(page, playnow_game_to_match,
             last_button = h2h_more_buttons[-1]
             await last_button.click()
             print("✅ Clicked a 'More' button.")
+            second_last_button = h2h_more_buttons[-2]
+            await second_last_button.click()
             await asyncio.sleep(1.5) # Wait for content to load/expand
+
         else:
             print("ℹ️ No button containing 'More' found. Details might be visible or accessed differently.")
 
@@ -527,8 +530,20 @@ async def main():
             print(f"\nProcessing DPM URL: {dpm_url}")
             try:
                 await page.go_to(dpm_url)
+                
                 print("  Waiting for DPM page to load (5 seconds)...")
                 await asyncio.sleep(5)
+                # look for button with text "Agree"
+                try:
+                    print("try to find Agree button")
+                    agree_buttons = await page.find_elements(By.XPATH,'//button[contains(text(), "Agree")]')
+                    print("agree_button found", agree_buttons)
+                    if len(agree_buttons) > 0:
+                        agree_button = agree_buttons[0]
+                        await agree_button.click()
+                        await asyncio.sleep(2)
+                except Exception as e:
+                    print(f"Error clicking 'Agree' button: {e}")
                 page_source_dpm_schedule = await page.page_source # This is the schedule view for the date
 
                 safe_dpm_url_filename_part = sanitize_filename(dpm_url)
@@ -578,13 +593,25 @@ async def main():
                         # This is important if clicking a game navigates away fully.
                         # If it's an overlay, this might not be strictly necessary but good for robustness.
                         # print(f"    Navigating back to DPM schedule page {dpm_url} to look for next match on this date.")
-                        await page.go_to(dpm_url)
-                        await asyncio.sleep(3) # Allow schedule page to reload
+                        # await page.go_to(dpm_url)
+                        # await asyncio.sleep(3) # Allow schedule page to reload
+                        # targets = await browser.get_targets()
+
+                        # # Filter for page targets only
+                        # pages = [t for t in targets if t.get('type') == 'page']
+
+                        # for index, page  in enumerate(pages):
+                        #     print(f"Page ID: {page['targetId']}")
+                        #     print(f"URL: {page['url']}")
+                        #     # Only close the page if it's not the first one (assuming the first page has index 0)
+                        #     if index != 0:
+                        #         page.close()
                         # dpm_schedule_soup = BeautifulSoup(await page.page_source, 'html.parser') # Re-parse schedule soup
                     else:
                         print(f"    Could not get detailed DPM match view for {playnow_game_entry['team1_name']} vs {playnow_game_entry['team2_name']}.")
             
             except Exception as e:
+                print(e)
                 print(f"  Error processing DPM URL {dpm_url} or its games: {e}")
 
         print("\n\n--- Combined eSports Data with DPM Head-to-Head ---")
@@ -613,11 +640,11 @@ async def main():
                     print(f"    All Time Wins: Data not fully parsed or available.")
 
                 if h2h.get('last_5_games'):
-                    print("    Last 5 Games (DPM Data):")
+                    print("    Last 5 Games (DPM Data):", h2h.get('last_5_games'))
                     for i, hist_game in enumerate(h2h.get('last_5_games', [])):
                         print(f"      {i+1}. Date: {hist_game.get('date', 'N/A')} | "
-                            f"{hist_game.get('team1_name', 'T1')} {hist_game.get('score1', 'S1')} - "
-                            f"{hist_game.get('score2', 'S2')} {hist_game.get('team2_name', 'T2')} "
+                            f"{game.get('team1_name', 'T1')} {game.get('score1', 'S1')} - "
+                            f"{game.get('score2', 'S2')} {game.get('team2_name', 'T2')} "
                             f"| Winner: {hist_game.get('winner', 'N/A')}")
                 else:
                     print("    Last 5 Games (DPM Data): Not available or not parsed.")
