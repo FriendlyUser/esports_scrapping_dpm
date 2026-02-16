@@ -1,0 +1,116 @@
+name: Testing pydoll # Name remains as per user's request, but runs on Linux now
+
+on:
+  workflow_dispatch: # Allows manual trigger
+
+
+jobs:
+  build:
+    runs-on: ubuntu-latest # Changed from macos-latest to ubuntu-latest for Xvfb and apt-get compatibility
+    env:
+      PY_COLORS: "1"
+      IPROYAL_USERNAME: ${{ secrets.IPROYAL_USERNAME }}
+      IPROYAL_PASSWORD: ${{ secrets.IPROYAL_PASSWORD }}
+    environment: scraping
+    strategy:
+      fail-fast: false
+      max-parallel: 6
+      matrix:
+        python-version: ["3.13"]
+
+    steps:
+    - uses: actions/checkout@v4
+    - name: Set up Python ${{ matrix.python-version }}
+      uses: actions/setup-python@v5
+      with:
+        python-version: ${{ matrix.python-version }}
+
+    - name: Install system dependencies for Chrome and Xvfb
+      # Google Chrome is needed for SeleniumBase
+      # xvfb is needed for virtual display if not running in strict headless mode
+      run: |
+        curl -fsSL https://dl.google.com/linux/linux_signing_key.pub | sudo gpg --dearmor -o /usr/share/keyrings/google-chrome.gpg
+        echo "deb [arch=amd64 signed-by=/usr/share/keyrings/google-chrome.gpg] http://dl.google.com/linux/chrome/deb/ stable main" | sudo tee /etc/apt/sources.list.d/google-chrome.list
+        
+        sudo apt update
+        sudo apt install google-chrome-stable
+        # --- Proxy Integration Starts Here ---
+        # - name: Get and Set Proxy Environment Variable
+        #   # This step runs your Python script to fetch a proxy
+        #   # and sets the SELENIUM_PROXY environment variable for subsequent steps.
+        #   run: python examples/get_proxy.py # Adjust path if your script is in a subfolder
+        # # --- Proxy Integration Ends Here ---
+        sudo apt-get install -y xvfb ffmpeg
+    # --- Proxy Integration Starts Here ---
+    # - name: Get and Set Proxy Environment Variable
+    #   # This step runs your Python script to fetch a proxy
+    #   # and sets the SELENIUM_PROXY environment variable for subsequent steps.
+    #   run: python examples/get_proxy.py # Adjust path if your script is in a subfolder
+    # # --- Proxy Integration Ends Here ---
+
+   
+
+    - name: Update
+      run: |
+        pip install -r requirements.txt
+        pip install playwright
+        playwright install chromium
+
+    - name: Run Browser Automation and Record Xvfb Session
+        # Set the DISPLAY environment variable for this entire step.
+        # All commands within this 'run' block will use this display.
+      env:
+        DISPLAY: ":99"
+        # Optional: PROXY_URL: ${{ steps.get_proxy.outputs.PROXY_URL }} if you re-enable proxy fetching
+      run: |
+        # 1. Create directory for video recordings
+        mkdir -p video_recordings
+        VIDEO_OUTPUT_PATH="video_recordings/session.mp4"
+        
+        # 2. Start Xvfb in the background
+        # Xvfb runs on display :99 with a resolution of 1920x1080 and 24-bit color depth.
+        Xvfb :99 -screen 0 1920x1080x24 -ac +extension GLX +render -noreset &
+        echo "Xvfb started on display :99"
+        
+        # Give Xvfb a moment to fully initialize
+        sleep 2
+        
+        # 3. Start FFmpeg recording in the background
+        # -y: Overwrite output files without asking
+        # -f x11grab: specifies the X11 grabbing device
+        # -framerate 15: Reduced framerate to save space/resources for CI/CD
+        # -video_size 1920x1080: IMPORTANT - matches Xvfb screen size
+        # -i :99.0: specifies the input display (:99, screen 0)
+        # -c:v libx264: uses H.264 video codec
+        # -preset medium -crf 28: Encoding options for balanced quality/size (higher CRF for smaller size)
+        # -pix_fmt yuv420p: ensures compatibility with most video players
+        ffmpeg -y -f x11grab -framerate 15 -video_size 1920x1080 -i :99.0 -c:v libx264 -preset medium -crf 28 -pix_fmt yuv420p "$VIDEO_OUTPUT_PATH" &
+        
+        # Store the FFmpeg process ID
+        FFMPEG_PID=$!
+        echo "FFmpeg recording started with PID: $FFMPEG_PID"
+        
+        # 4. Run your browser automation script
+        echo "Running scraper.py..."
+        python download_stats.py
+        
+        # 5. Stop FFmpeg recording gracefully
+        echo "Stopping FFmpeg recording..."
+        kill -s SIGINT $FFMPEG_PID || true # Send SIGINT to FFmpeg to stop
+        wait $FFMPEG_PID || true # Wait for FFmpeg process to fully terminate
+        
+        echo "Video recording completed: $VIDEO_OUTPUT_PATH"
+
+    - name: Upload Screenshots
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: cloudflare-screenshots
+        path: screenshots/
+
+    - name: Upload Video Recording
+      if: always() # Upload even if previous steps fail
+      uses: actions/upload-artifact@v4
+      with:
+        name: xvfb-session-video
+        path: video_recordings/session.mp4 # Path where your video is saved
