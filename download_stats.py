@@ -357,8 +357,16 @@ async def main():
                 f.write("\n".join(analysis_results))
 
             # open the file in windows
-            os.startfile("data/analysis_results.txt")
-            print("\n✅ Data saved to data/analysis_results.txt")
+            try:
+                current_os = platform.system().lower()
+                if current_os == "windows":
+                    os.startfile(file_path)
+                elif current_os == "darwin":  # macOS
+                    subprocess.run(["open", file_path])
+                else:  # linux and others
+                    subprocess.run(["xdg-open", file_path])
+            except Exception as e:
+                print("linux")
         else:
             print("⚠️ No games found in the parsed content.")
     else:
