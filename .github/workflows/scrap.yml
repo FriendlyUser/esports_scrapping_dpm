@@ -101,12 +101,12 @@ jobs:
         
         echo "Video recording completed: $VIDEO_OUTPUT_PATH"
 
-    - name: Upload Screenshots
+    - name: Scrap Data
       if: always()
       uses: actions/upload-artifact@v4
       with:
         name: cloudflare-screenshots
-        path: screenshots/
+        path: data/
 
     - name: Upload Video Recording
       if: always() # Upload even if previous steps fail
