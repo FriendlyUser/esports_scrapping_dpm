@@ -4,6 +4,7 @@ import pandas as pd
 from bs4 import BeautifulSoup
 from pydoll.constants import Key
 from pydoll.browser.chromium import Chrome
+from pydoll.browser.options import ChromiumOptions
 from datetime import datetime, timedelta
 import dateparser
 import re
@@ -179,7 +180,18 @@ async def scrape_playnow_live(url):
     # Configure Options (if needed, currently using defaults within Chrome class)
     # options = Options() 
     # options.add_argument('--headless=new')
+    options = ChromiumOptions()
+    
+    # Add stealth argument from the new logic recommendations
+    options.add_argument('--disable-blink-features=AutomationControlled')
 
+    # Environment and Display handling
+    if not os.environ.get("NODRIVER_HEADLESS") == "True" and os.environ.get("DISPLAY", ":99"):
+        display_var = os.environ.get("DISPLAY")
+        print("display", display_var)
+        options.add_argument(f'--display=:99')
+
+    options.add_argument("--enable-webgl")
     async with Chrome() as browser:
         tab = await browser.start()
 
