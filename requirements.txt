@@ -1,5 +1,5 @@
 dateparser
-pydoll
+pydoll-python
 pandas
 python-dotenv
 beautifulsoup4
